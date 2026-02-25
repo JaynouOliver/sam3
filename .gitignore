@@ -18,13 +18,30 @@ build/
 .env
 *.log
 
-# IDE
+# Claude Code internals
+.claude/
+.claude.json
+
+# IDE / editor servers
 .vscode/
+.vscode-server/
+.cursor-server/
+.windsurf-server/
 .idea/
 
-# OS
+# OS / platform
 .DS_Store
 Thumbs.db
+.lightning_studio/
+.wget-hsts
+
+# Data (large JSON dumps and image dirs)
+firestore_gen_images.json
+firestore_gen_room_images.json
+room_images/
+
+# Test images
+CalmTeaHouseupscaled.jpg
 
 # Model weights
 *.pt
