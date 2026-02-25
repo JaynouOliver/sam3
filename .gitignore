@@ -1,0 +1,35 @@
+# Data (too large for git)
+firestore_gen/
+product_images/
+yolo_dataset/
+sam3_labels/
+sam3_labels_1k/
+yolo_training/
+products_for_labeling.json
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+
+# Autodistill cloned repo (installable via pip)
+autodistill-sam3/
