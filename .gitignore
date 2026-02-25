@@ -24,9 +24,9 @@ build/
 
 # IDE / editor servers
 .vscode/
-.vscode-server/
-.cursor-server/
-.windsurf-server/
+.vscode-server
+.cursor-server
+.windsurf-server
 .idea/
 
 # OS / platform
