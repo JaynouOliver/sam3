@@ -6,6 +6,10 @@ sam3_labels/
 sam3_labels_1k/
 yolo_training/
 products_for_labeling.json
+pipeline_labels/
+pipeline_dataset/
+pipeline_training/
+sam3_viz/
 
 # Python
 __pycache__/
