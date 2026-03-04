@@ -1,9 +1,12 @@
 """
-End-to-end training pipeline: SAM3 auto-label → YOLO dataset → YOLOv8n training.
+End-to-end training pipeline: SAM3 auto-label → YOLO dataset → YOLOv8n-seg training.
+Exports SAM3 masks as segmentation polygons (not bounding boxes).
+No filters applied — all raw SAM3 detections are used as training labels.
 Change NUM_IMAGES to control how many images to process (10 for testing, 1000 for full run).
 """
 import os, sys, time, glob, json, random, shutil
 import numpy as np
+import cv2
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Thread
 from queue import Queue
@@ -19,8 +22,6 @@ IMAGE_DIR = "/teamspace/studios/this_studio/room_images"
 LABEL_DIR = "/teamspace/studios/this_studio/pipeline_labels"
 DATASET_DIR = "/teamspace/studios/this_studio/pipeline_dataset"
 TRAIN_DIR = "/teamspace/studios/this_studio/pipeline_training"
-MIN_CONFIDENCE = 0.65
-MIN_AREA = 400
 SPLIT_RATIO = 0.85
 SEED = 42
 PRELOAD_WORKERS = 4
@@ -58,7 +59,6 @@ print("=" * 70)
 from autodistill_sam3 import SegmentAnything3
 from autodistill.detection import CaptionOntology
 from autodistill.helpers import load_image
-import supervision as sv
 
 print("Loading SAM3...")
 t0 = time.time()
@@ -85,15 +85,56 @@ for d in [LABEL_DIR, DATASET_DIR]:
 os.makedirs(os.path.join(LABEL_DIR, "labels"), exist_ok=True)
 
 
-def detections_to_yolo(detections, img_w, img_h):
+def mask_to_polygon(mask, img_w, img_h, max_points=100):
+    """Convert a binary mask to a normalized polygon (YOLO seg format).
+    Returns list of normalized (x, y) floats, or None if mask is invalid."""
+    mask_uint8 = (mask.astype(np.uint8)) * 255
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    # Take the largest contour
+    contour = max(contours, key=cv2.contourArea)
+    if len(contour) < 3:
+        return None
+    # Simplify if too many points
+    if len(contour) > max_points:
+        epsilon = 0.001 * cv2.arcLength(contour, True)
+        contour = cv2.approxPolyDP(contour, epsilon, True)
+        while len(contour) > max_points and epsilon < 0.05 * cv2.arcLength(contour, True):
+            epsilon *= 1.5
+            contour = cv2.approxPolyDP(contour, epsilon, True)
+    if len(contour) < 3:
+        return None
+    # Normalize to [0, 1]
+    points = []
+    for pt in contour.squeeze():
+        points.append(pt[0] / img_w)
+        points.append(pt[1] / img_h)
+    return points
+
+
+def detections_to_yolo_seg(detections, img_w, img_h):
+    """Convert detections with masks to YOLO segmentation format.
+    Format: class_id x1 y1 x2 y2 x3 y3 ... (normalized polygon points)
+    Falls back to bbox polygon if mask is unavailable."""
     lines = []
-    for xyxy, conf, class_id in zip(detections.xyxy, detections.confidence, detections.class_id):
-        x1, y1, x2, y2 = xyxy
-        cx = ((x1 + x2) / 2) / img_w
-        cy = ((y1 + y2) / 2) / img_h
-        w = (x2 - x1) / img_w
-        h = (y2 - y1) / img_h
-        lines.append(f"{int(class_id)} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
+    has_masks = detections.mask is not None and len(detections.mask) > 0
+    for i in range(len(detections)):
+        class_id = int(detections.class_id[i])
+        polygon = None
+        if has_masks:
+            polygon = mask_to_polygon(detections.mask[i], img_w, img_h)
+        # Fallback: convert bbox to a 4-point polygon
+        if polygon is None:
+            x1, y1, x2, y2 = detections.xyxy[i]
+            polygon = [
+                x1 / img_w, y1 / img_h,
+                x2 / img_w, y1 / img_h,
+                x2 / img_w, y2 / img_h,
+                x1 / img_w, y2 / img_h,
+            ]
+        coords = " ".join(f"{v:.6f}" for v in polygon)
+        lines.append(f"{class_id} {coords}")
     return lines
 
 
@@ -130,7 +171,6 @@ save_futures = []
 total_start = time.time()
 processed = 0
 total_raw = 0
-total_filtered = 0
 valid_pairs = []
 class_counts = {}
 
@@ -155,16 +195,7 @@ while True:
         raw_count = len(detections)
         total_raw += raw_count
 
-        if len(detections) > 0:
-            areas = (detections.xyxy[:, 2] - detections.xyxy[:, 0]) * \
-                    (detections.xyxy[:, 3] - detections.xyxy[:, 1])
-            mask = (detections.confidence >= MIN_CONFIDENCE) & (areas >= MIN_AREA)
-            detections = detections[mask]
-            if len(detections) > 0:
-                detections = detections.with_nms(threshold=0.5, class_agnostic=True)
-
-        filtered = len(detections)
-        total_filtered += filtered
+        # No filters — use raw SAM3 output as-is
 
         # Track class distribution
         if len(detections) > 0:
@@ -173,13 +204,13 @@ while True:
                 class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
 
         img_h, img_w = image.shape[:2]
-        yolo_lines = detections_to_yolo(detections, img_w, img_h)
+        yolo_lines = detections_to_yolo_seg(detections, img_w, img_h)
         save_futures.append(save_pool.submit(save_label, stem, yolo_lines))
 
-        if filtered > 0:
+        if raw_count > 0:
             valid_pairs.append((img_path, os.path.join(LABEL_DIR, "labels", f"{stem}.txt")))
 
-        print(f"  [{processed}/{len(image_paths)}] {fname} ... {infer_time:.1f}s | raw={raw_count} filt={filtered}")
+        print(f"  [{processed}/{len(image_paths)}] {fname} ... {infer_time:.1f}s | detections={raw_count}")
 
     except Exception as e:
         print(f"  [{processed}/{len(image_paths)}] {fname} ... ERROR: {e}")
@@ -191,7 +222,7 @@ save_pool.shutdown()
 label_time = time.time() - total_start
 print(f"\nLabeling done: {processed} images in {label_time:.1f}s ({label_time/max(processed,1):.1f}s/img)")
 print(f"Valid images (with detections): {len(valid_pairs)}/{processed}")
-print(f"Total raw: {total_raw} | Total filtered: {total_filtered}")
+print(f"Total detections: {total_raw} (no filters applied)")
 print(f"\nClass distribution:")
 for cls, cnt in sorted(class_counts.items(), key=lambda x: -x[1]):
     print(f"  {cls:25s}: {cnt}")
@@ -203,13 +234,11 @@ with open(os.path.join(LABEL_DIR, "summary.json"), "w") as f:
     json.dump({
         "num_images": processed,
         "valid_images": len(valid_pairs),
-        "total_raw": total_raw,
-        "total_filtered": total_filtered,
+        "total_detections": total_raw,
+        "filters": "none — raw SAM3 output",
         "class_counts": class_counts,
         "label_time_seconds": round(label_time, 1),
         "config": {
-            "min_confidence": MIN_CONFIDENCE,
-            "min_area": MIN_AREA,
             "num_classes": len(classes),
         },
     }, f, indent=2)
@@ -268,10 +297,10 @@ print(f"Dataset YAML: {dataset_yaml_path}")
 print("Dataset ready\n")
 
 # ═══════════════════════════════════════════════════════════════════
-# STEP 3: TRAIN YOLOv8n
+# STEP 3: TRAIN YOLOv8n-seg
 # ═══════════════════════════════════════════════════════════════════
 print("=" * 70)
-print("STEP 3: Train YOLOv8n Student Model")
+print("STEP 3: Train YOLOv8n-seg Student Model")
 print("=" * 70)
 
 from ultralytics import YOLO
@@ -279,7 +308,7 @@ from ultralytics import YOLO
 # Scale epochs: short for test runs, full for production
 train_epochs = 20 if NUM_IMAGES <= 50 else 150
 
-yolo = YOLO("yolov8n.pt")
+yolo = YOLO("yolov8n-seg.pt")
 results = yolo.train(
     data=dataset_yaml_path,
     epochs=train_epochs,
