@@ -16,7 +16,7 @@ os.environ['ROBOFLOW_API_KEY'] = '6mPyaZWFhvbmBKftxcq7'
 # ═══════════════════════════════════════════════════════════════════
 # CONFIG — Change NUM_IMAGES here
 # ═══════════════════════════════════════════════════════════════════
-NUM_IMAGES = 10  # Set to 1000 for full training run
+NUM_IMAGES = 1000  # Set to 1000 for full training run
 
 IMAGE_DIR = "/teamspace/studios/this_studio/room_images"
 LABEL_DIR = "/teamspace/studios/this_studio/pipeline_labels"
